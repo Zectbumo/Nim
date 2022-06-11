@@ -183,7 +183,6 @@ type
     gcMarkAndSweep = "markAndSweep"
     gcHooks = "hooks"
     gcRefc = "refc"
-    gcV2 = "v2"
     gcGo = "go"
     # gcRefc and the GCs that follow it use a write barrier,
     # as far as usesWriteBarrier() is concerned
@@ -807,6 +806,8 @@ proc toGeneratedFile*(conf: ConfigRef; path: AbsoluteFile,
 
 proc completeGeneratedFilePath*(conf: ConfigRef; f: AbsoluteFile,
                                 createSubDir: bool = true): AbsoluteFile =
+  ## Return an absolute path of a generated intermediary file.
+  ## Optionally creates the cache directory if `createSubDir` is `true`.
   let subdir = getNimcacheDir(conf)
   if createSubDir:
     try:
@@ -814,11 +815,6 @@ proc completeGeneratedFilePath*(conf: ConfigRef; f: AbsoluteFile,
     except OSError:
       conf.quitOrRaise "cannot create directory: " & subdir.string
   result = subdir / RelativeFile f.string.splitPath.tail
-  #echo "completeGeneratedFilePath(", f, ") = ", result
-
-proc toRodFile*(conf: ConfigRef; f: AbsoluteFile; ext = RodExt): AbsoluteFile =
-  result = changeFileExt(completeGeneratedFilePath(conf,
-    withPackageName(conf, f)), ext)
 
 proc rawFindFile(conf: ConfigRef; f: RelativeFile; suppressStdlib: bool): AbsoluteFile =
   for it in conf.searchPaths:
