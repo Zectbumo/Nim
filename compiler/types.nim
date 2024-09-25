@@ -31,6 +31,7 @@ type
       # most useful, shows: symbol + resolved symbols if it differs, e.g.:
       # tuple[a: MyInt{int}, b: float]
     preferInlayHint,
+    preferInferredEffects,
 
   TTypeRelation* = enum      # order is important!
     isNone, isConvertible,
@@ -114,7 +115,7 @@ proc isPureObject*(typ: PType): bool =
 proc isUnsigned*(t: PType): bool =
   t.skipTypes(abstractInst).kind in {tyChar, tyUInt..tyUInt64}
 
-proc getOrdValue*(n: PNode; onError = high(Int128)): Int128 =
+proc getOrdValueAux*(n: PNode, err: var bool): Int128 =
   var k = n.kind
   if n.typ != nil and n.typ.skipTypes(abstractInst).kind in {tyChar, tyUInt..tyUInt64}:
     k = nkUIntLit
@@ -130,13 +131,22 @@ proc getOrdValue*(n: PNode; onError = high(Int128)): Int128 =
     toInt128(n.intVal)
   of nkNilLit:
     int128.Zero
-  of nkHiddenStdConv: getOrdValue(n[1], onError)
+  of nkHiddenStdConv:
+    getOrdValueAux(n[1], err)
   else:
-    # XXX: The idea behind the introduction of int128 was to finally
-    # have all calculations numerically far away from any
-    # overflows. This command just introduces such overflows and
-    # should therefore really be revisited.
-    onError
+    err = true
+    int128.Zero
+
+proc getOrdValue*(n: PNode): Int128 =
+  var err: bool = false
+  result = getOrdValueAux(n, err)
+  #assert err == false
+
+proc getOrdValue*(n: PNode, onError: Int128): Int128 =
+  var err = false
+  result = getOrdValueAux(n, err)
+  if err:
+    result = onError
 
 proc getFloatValue*(n: PNode): BiggestFloat =
   case n.kind
@@ -222,7 +232,11 @@ proc iterOverTypeAux(marker: var IntSet, t: PType, iter: TTypeIter,
   if result: return
   if not containsOrIncl(marker, t.id):
     case t.kind
-    of tyGenericInst, tyGenericBody, tyAlias, tySink, tyInferred:
+    of tyGenericBody:
+      # treat as atomic, containsUnresolvedType wants always false,
+      # containsGenericType always gives true
+      discard
+    of tyGenericInst, tyAlias, tySink, tyInferred:
       result = iterOverTypeAux(marker, skipModifier(t), iter, closure)
     else:
       for a in t.kids:
@@ -477,7 +491,7 @@ const
     "void", "iterable"]
 
 const preferToResolveSymbols = {preferName, preferTypeName, preferModuleInfo,
-  preferGenericArg, preferResolved, preferMixed, preferInlayHint}
+  preferGenericArg, preferResolved, preferMixed, preferInlayHint, preferInferredEffects}
 
 template bindConcreteTypeToUserTypeClass*(tc, concrete: PType) =
   tc.add concrete
@@ -530,7 +544,7 @@ proc typeToString(typ: PType, prefer: TPreferedDesc = preferName): string =
           result = t.sym.name.s
         if prefer == preferMixed and result != t.sym.name.s:
           result = t.sym.name.s & "{" & result & "}"
-      elif prefer in {preferName, preferTypeName, preferInlayHint} or t.sym.owner.isNil:
+      elif prefer in {preferName, preferTypeName, preferInlayHint, preferInferredEffects} or t.sym.owner.isNil:
         # note: should probably be: {preferName, preferTypeName, preferGenericArg}
         result = t.sym.name.s
         if t.kind == tyGenericParam and t.genericParamHasConstraints:
@@ -723,6 +737,7 @@ proc typeToString(typ: PType, prefer: TPreferedDesc = preferName): string =
       result.add(')')
       if t.returnType != nil: result.add(": " & typeToString(t.returnType))
       var prag = if t.callConv == ccNimCall and tfExplicitCallConv notin t.flags: "" else: $t.callConv
+      var hasImplicitRaises = false
       if not isNil(t.owner) and not isNil(t.owner.ast) and (t.owner.ast.len - 1) >= pragmasPos:
         let pragmasNode = t.owner.ast[pragmasPos]
         let raisesSpec = effectSpec(pragmasNode, wRaises)
@@ -730,13 +745,37 @@ proc typeToString(typ: PType, prefer: TPreferedDesc = preferName): string =
           addSep(prag)
           prag.add("raises: ")
           prag.add($raisesSpec)
-
+          hasImplicitRaises = true
       if tfNoSideEffect in t.flags:
         addSep(prag)
         prag.add("noSideEffect")
       if tfThread in t.flags:
         addSep(prag)
         prag.add("gcsafe")
+      var effectsOfStr = ""
+      for i, a in t.paramTypes:
+        let j = paramTypeToNodeIndex(i)
+        if t.n != nil and j < t.n.len and t.n[j].kind == nkSym and t.n[j].sym.kind == skParam and sfEffectsDelayed in t.n[j].sym.flags:
+          addSep(effectsOfStr)
+          effectsOfStr.add(t.n[j].sym.name.s)
+      if effectsOfStr != "":
+        addSep(prag)
+        prag.add("effectsOf: ")
+        prag.add(effectsOfStr)
+      if not hasImplicitRaises and prefer == preferInferredEffects and not isNil(t.owner) and not isNil(t.owner.typ) and not isNil(t.owner.typ.n) and (t.owner.typ.n.len > 0):
+        let effects = t.owner.typ.n[0]
+        if effects.kind == nkEffectList and effects.len == effectListLen:
+          var inferredRaisesStr = ""
+          let effs = effects[exceptionEffects]
+          if not isNil(effs):
+            for eff in items(effs):
+              if not isNil(eff):
+                addSep(inferredRaisesStr)
+                inferredRaisesStr.add($eff.typ)
+          addSep(prag)
+          prag.add("raises: <inferred> [")
+          prag.add(inferredRaisesStr)
+          prag.add("]")
       if prag.len != 0: result.add("{." & prag & ".}")
     of tyVarargs:
       result = typeToStr[t.kind] % typeToString(t.elementType)
@@ -751,7 +790,7 @@ proc typeToString(typ: PType, prefer: TPreferedDesc = preferName): string =
 
 proc firstOrd*(conf: ConfigRef; t: PType): Int128 =
   case t.kind
-  of tyBool, tyChar, tySequence, tyOpenArray, tyString, tyVarargs, tyProxy:
+  of tyBool, tyChar, tySequence, tyOpenArray, tyString, tyVarargs, tyError:
     result = Zero
   of tySet, tyVar: result = firstOrd(conf, t.elementType)
   of tyArray: result = firstOrd(conf, t.indexType)
@@ -793,12 +832,12 @@ proc firstOrd*(conf: ConfigRef; t: PType): Int128 =
     if t.hasElementType: result = firstOrd(conf, skipModifier(t))
     else:
       result = Zero
-      internalError(conf, "invalid kind for firstOrd(" & $t.kind & ')')
+      fatal(conf, unknownLineInfo, "invalid kind for firstOrd(" & $t.kind & ')')
   of tyUncheckedArray, tyCstring:
     result = Zero
   else:
     result = Zero
-    internalError(conf, "invalid kind for firstOrd(" & $t.kind & ')')
+    fatal(conf, unknownLineInfo, "invalid kind for firstOrd(" & $t.kind & ')')
 
 proc firstFloat*(t: PType): BiggestFloat =
   case t.kind
@@ -884,17 +923,17 @@ proc lastOrd*(conf: ConfigRef; t: PType): Int128 =
     result = lastOrd(conf, skipModifier(t))
   of tyUserTypeClasses:
     result = lastOrd(conf, last(t))
-  of tyProxy: result = Zero
+  of tyError: result = Zero
   of tyOrdinal:
     if t.hasElementType: result = lastOrd(conf, skipModifier(t))
     else:
       result = Zero
-      internalError(conf, "invalid kind for lastOrd(" & $t.kind & ')')
+      fatal(conf, unknownLineInfo, "invalid kind for lastOrd(" & $t.kind & ')')
   of tyUncheckedArray:
     result = Zero
   else:
     result = Zero
-    internalError(conf, "invalid kind for lastOrd(" & $t.kind & ')')
+    fatal(conf, unknownLineInfo, "invalid kind for lastOrd(" & $t.kind & ')')
 
 proc lastFloat*(t: PType): BiggestFloat =
   case t.kind
@@ -959,6 +998,8 @@ type
     AllowCommonBase
     PickyCAliases  # be picky about the distinction between 'cint' and 'int32'
     IgnoreFlags    # used for borrowed functions and methods; ignores the tfVarIsPtr flag
+    PickyBackendAliases # be picky about different aliases
+    IgnoreRangeShallow
 
   TTypeCmpFlags* = set[TTypeCmpFlag]
 
@@ -1187,25 +1228,39 @@ proc sameTypeAux(x, y: PType, c: var TSameTypeClosure): bool =
       inc c.recCheck
     else:
       if containsOrIncl(c, a, b): return true
+  template maybeSkipRange(x: set[TTypeKind]): set[TTypeKind] =
+    if IgnoreRangeShallow in c.flags:
+      x + {tyRange}
+    else:
+      x
+  
+  template withoutShallowFlags(body) =
+    let oldFlags = c.flags
+    c.flags.excl IgnoreRangeShallow
+    body
+    c.flags = oldFlags
 
   if x == y: return true
-  var a = skipTypes(x, {tyAlias})
+  let aliasSkipSet = maybeSkipRange({tyAlias})
+  var a = skipTypes(x, aliasSkipSet)
   while a.kind == tyUserTypeClass and tfResolved in a.flags:
-    a = skipTypes(a.last, {tyAlias})
-  var b = skipTypes(y, {tyAlias})
+    a = skipTypes(a.last, aliasSkipSet)
+  var b = skipTypes(y, aliasSkipSet)
   while b.kind == tyUserTypeClass and tfResolved in b.flags:
-    b = skipTypes(b.last, {tyAlias})
+    b = skipTypes(b.last, aliasSkipSet)
   assert(a != nil)
   assert(b != nil)
   if a.kind != b.kind:
     case c.cmp
     of dcEq: return false
     of dcEqIgnoreDistinct:
-      a = a.skipTypes({tyDistinct, tyGenericInst})
-      b = b.skipTypes({tyDistinct, tyGenericInst})
+      let distinctSkipSet = maybeSkipRange({tyDistinct, tyGenericInst})
+      a = a.skipTypes(distinctSkipSet)
+      b = b.skipTypes(distinctSkipSet)
       if a.kind != b.kind: return false
     of dcEqOrDistinctOf:
-      a = a.skipTypes({tyDistinct, tyGenericInst})
+      let distinctSkipSet = maybeSkipRange({tyDistinct, tyGenericInst})
+      a = a.skipTypes(distinctSkipSet)
       if a.kind != b.kind: return false
 
   #[
@@ -1218,10 +1273,11 @@ proc sameTypeAux(x, y: PType, c: var TSameTypeClosure): bool =
     let
       lhs = x.skipGenericAlias
       rhs = y.skipGenericAlias
-    if rhs.kind != tyGenericInst or lhs.base != rhs.base:
+    if rhs.kind != tyGenericInst or lhs.base != rhs.base or rhs.kidsLen != lhs.kidsLen:
       return false
-    for ff, aa in underspecifiedPairs(rhs, lhs, 1, -1):
-      if not sameTypeAux(ff, aa, c): return false
+    withoutShallowFlags:
+      for ff, aa in underspecifiedPairs(rhs, lhs, 1, -1):
+        if not sameTypeAux(ff, aa, c): return false
     return true
 
   case a.kind
@@ -1235,6 +1291,11 @@ proc sameTypeAux(x, y: PType, c: var TSameTypeClosure): bool =
       let symFlagsB = if b.sym != nil: b.sym.flags else: {}
       if (symFlagsA+symFlagsB) * {sfImportc, sfExportc} != {}:
         result = symFlagsA == symFlagsB
+    elif result and PickyBackendAliases in c.flags:
+      let symFlagsA = if a.sym != nil: a.sym.flags else: {}
+      let symFlagsB = if b.sym != nil: b.sym.flags else: {}
+      if (symFlagsA+symFlagsB) * {sfImportc, sfExportc} != {}:
+        result = a.id == b.id
 
   of tyStatic, tyFromExpr:
     result = exprStructuralEquivalent(a.n, b.n) and sameFlags(a, b)
@@ -1242,9 +1303,10 @@ proc sameTypeAux(x, y: PType, c: var TSameTypeClosure): bool =
       cycleCheck()
       result = sameTypeAux(a.skipModifier, b.skipModifier, c)
   of tyObject:
-    ifFastObjectTypeCheckFailed(a, b):
-      cycleCheck()
-      result = sameObjectStructures(a, b, c) and sameFlags(a, b)
+    withoutShallowFlags:
+      ifFastObjectTypeCheckFailed(a, b):
+        cycleCheck()
+        result = sameObjectStructures(a, b, c) and sameFlags(a, b)
   of tyDistinct:
     cycleCheck()
     if c.cmp == dcEq:
@@ -1259,8 +1321,9 @@ proc sameTypeAux(x, y: PType, c: var TSameTypeClosure): bool =
   of tyError:
     result = b.kind == tyError
   of tyTuple:
-    cycleCheck()
-    result = sameTuple(a, b, c) and sameFlags(a, b)
+    withoutShallowFlags:
+      cycleCheck()
+      result = sameTuple(a, b, c) and sameFlags(a, b)
   of tyTypeDesc:
     if c.cmp == dcEqIgnoreDistinct: result = false
     elif ExactTypeDescValues in c.flags:
@@ -1284,7 +1347,8 @@ proc sameTypeAux(x, y: PType, c: var TSameTypeClosure): bool =
      tyAnd, tyOr, tyNot, tyAnything, tyOwned:
     cycleCheck()
     if a.kind == tyUserTypeClass and a.n != nil: return a.n == b.n
-    result = sameChildrenAux(a, b, c)
+    withoutShallowFlags:
+      result = sameChildrenAux(a, b, c)
     if result and IgnoreFlags notin c.flags:
       if IgnoreTupleFields in c.flags:
         result = a.flags * {tfVarIsPtr, tfIsOutParam} == b.flags * {tfVarIsPtr, tfIsOutParam}
@@ -1297,11 +1361,21 @@ proc sameTypeAux(x, y: PType, c: var TSameTypeClosure): bool =
                ((ExactConstraints notin c.flags) or sameConstraints(a.n, b.n))
   of tyRange:
     cycleCheck()
-    result = sameTypeOrNilAux(a.elementType, b.elementType, c) and
-        sameValue(a.n[0], b.n[0]) and
+    result = sameTypeOrNilAux(a.elementType, b.elementType, c)
+    if result and IgnoreRangeShallow notin c.flags:
+      result = sameValue(a.n[0], b.n[0]) and
         sameValue(a.n[1], b.n[1])
-  of tyGenericInst, tyAlias, tyInferred, tyIterable:
+  of tyAlias, tyInferred, tyIterable:
     cycleCheck()
+    result = sameTypeAux(a.skipModifier, b.skipModifier, c)
+  of tyGenericInst:
+    # BUG #23445
+    # The type system must distinguish between `T[int] = object #[empty]#`
+    # and `T[float] = object #[empty]#`!
+    cycleCheck()
+    withoutShallowFlags:
+      for ff, aa in underspecifiedPairs(a, b, 1, -1):
+        if not sameTypeAux(ff, aa, c): return false
     result = sameTypeAux(a.skipModifier, b.skipModifier, c)
   of tyNone: result = false
   of tyConcept:
@@ -1310,6 +1384,19 @@ proc sameTypeAux(x, y: PType, c: var TSameTypeClosure): bool =
 proc sameBackendType*(x, y: PType): bool =
   var c = initSameTypeClosure()
   c.flags.incl IgnoreTupleFields
+  c.cmp = dcEqIgnoreDistinct
+  result = sameTypeAux(x, y, c)
+
+proc sameBackendTypeIgnoreRange*(x, y: PType): bool =
+  var c = initSameTypeClosure()
+  c.flags.incl IgnoreTupleFields
+  c.flags.incl IgnoreRangeShallow
+  c.cmp = dcEqIgnoreDistinct
+  result = sameTypeAux(x, y, c)
+
+proc sameBackendTypePickyAliases*(x, y: PType): bool =
+  var c = initSameTypeClosure()
+  c.flags.incl {IgnoreTupleFields, PickyCAliases, PickyBackendAliases}
   c.cmp = dcEqIgnoreDistinct
   result = sameTypeAux(x, y, c)
 
@@ -1373,6 +1460,8 @@ proc commonSuperclass*(a, b: PType): PType =
       return t
     y = y.baseClass
 
+proc lacksMTypeField*(typ: PType): bool {.inline.} =
+  (typ.sym != nil and sfPure in typ.sym.flags) or tfFinal in typ.flags
 
 include sizealignoffsetimpl
 
@@ -1408,6 +1497,23 @@ proc containsGenericTypeIter(t: PType, closure: RootRef): bool =
 
 proc containsGenericType*(t: PType): bool =
   result = iterOverType(t, containsGenericTypeIter, nil)
+
+proc containsUnresolvedTypeIter(t: PType, closure: RootRef): bool =
+  if tfUnresolved in t.flags: return true
+  case t.kind
+  of tyStatic:
+    return t.n == nil
+  of tyTypeDesc:
+    if t.base.kind == tyNone: return true
+    if containsUnresolvedTypeIter(t.base, closure): return true
+    return false
+  of tyGenericInvocation, tyGenericParam, tyFromExpr, tyAnything:
+    return true
+  else:
+    return false
+
+proc containsUnresolvedType*(t: PType): bool =
+  result = iterOverType(t, containsUnresolvedTypeIter, nil)
 
 proc baseOfDistinct*(t: PType; g: ModuleGraph; idgen: IdGenerator): PType =
   if t.kind == tyDistinct:
@@ -1692,6 +1798,13 @@ proc processPragmaAndCallConvMismatch(msg: var string, formal, actual: PType, co
     of efTagsIllegal:
       msg.add "\n.notTag catched an illegal effect"
 
+proc typeNameAndDesc*(t: PType): string =
+  result = typeToString(t)
+  let desc = typeToString(t, preferDesc)
+  if result != desc:
+    result.add(" = ")
+    result.add(desc)
+
 proc typeMismatch*(conf: ConfigRef; info: TLineInfo, formal, actual: PType, n: PNode) =
   if formal.kind != tyError and actual.kind != tyError:
     let actualStr = typeToString(actual)
@@ -1821,6 +1934,3 @@ proc isCharArrayPtr*(t: PType; allowPointerToChar: bool): bool =
       result = false
   else:
     result = false
-
-proc lacksMTypeField*(typ: PType): bool {.inline.} =
-  (typ.sym != nil and sfPure in typ.sym.flags) or tfFinal in typ.flags

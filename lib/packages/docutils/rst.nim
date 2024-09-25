@@ -380,8 +380,8 @@ type
     kind: FootnoteType  # discriminator
     number: int         # valid for fnManualNumber (always) and fnAutoNumber,
                         # fnAutoNumberLabel after resolveSubs is called
-    autoNumIdx: int     # order of occurence: fnAutoNumber, fnAutoNumberLabel
-    autoSymIdx: int     # order of occurence: fnAutoSymbol
+    autoNumIdx: int     # order of occurrence: fnAutoNumber, fnAutoNumberLabel
+    autoSymIdx: int     # order of occurrence: fnAutoSymbol
     label: string       # valid for fnAutoNumberLabel
   RstFileTable* = object
     filenameToIdx*: Table[string, FileIndex]
@@ -1526,7 +1526,7 @@ proc parseMarkdownCodeblockFields(p: var RstParser): PRstNode =
     result = nil
   else:
     result = newRstNode(rnFieldList)
-  while currentTok(p).kind != tkIndent:
+  while currentTok(p).kind notin {tkIndent, tkEof}:
     if currentTok(p).kind == tkWhite:
       inc p.idx
     else:
@@ -1603,6 +1603,7 @@ proc parseMarkdownCodeblock(p: var RstParser): PRstNode =
   else:
     args = nil
   var n = newLeaf("")
+  var isFirstLine = true
   while true:
     if currentTok(p).kind == tkEof:
       rstMessage(p, meMissingClosing,
@@ -1614,7 +1615,8 @@ proc parseMarkdownCodeblock(p: var RstParser): PRstNode =
       inc p.idx, 2
       break
     elif currentTok(p).kind == tkIndent:
-      n.text.add "\n"
+      if not isFirstLine:
+        n.text.add "\n"
       if currentTok(p).ival > baseCol:
         n.text.add " ".repeat(currentTok(p).ival - baseCol)
       elif currentTok(p).ival < baseCol:
@@ -1624,6 +1626,7 @@ proc parseMarkdownCodeblock(p: var RstParser): PRstNode =
     else:
       n.text.add(currentTok(p).symbol)
       inc p.idx
+    isFirstLine = false
   result.sons[0] = args
   if result.sons[2] == nil:
     var lb = newRstNode(rnLiteralBlock)

@@ -30,13 +30,15 @@ proc addDefaultFieldForNew(c: PContext, n: PNode): PNode =
     if asgnExpr.sons.len > 1:
       result = newTree(nkAsgn, result[1], asgnExpr)
 
-proc semAddrArg(c: PContext; n: PNode): PNode =
+proc semAddr(c: PContext; n: PNode): PNode =
+  result = newNodeI(nkAddr, n.info)
   let x = semExprWithType(c, n)
   if x.kind == nkSym:
     x.sym.flags.incl(sfAddrTaken)
   if isAssignable(c, x) notin {arLValue, arLocalLValue, arAddressableConst, arLentValue}:
     localError(c.config, n.info, errExprHasNoAddress)
-  result = x
+  result.add x
+  result.typ = makePtrType(c, x.typ)
 
 proc semTypeOf(c: PContext; n: PNode): PNode =
   var m = BiggestInt 1 # typeOfIter
@@ -47,8 +49,12 @@ proc semTypeOf(c: PContext; n: PNode): PNode =
     else:
       m = mode.intVal
   result = newNodeI(nkTypeOfExpr, n.info)
+  inc c.inTypeofContext
+  defer: dec c.inTypeofContext # compiles can raise an exception
   let typExpr = semExprWithType(c, n[1], if m == 1: {efInTypeof} else: {})
   result.add typExpr
+  if typExpr.typ.kind == tyFromExpr:
+    typExpr.typ.flags.incl tfNonConstExpr
   result.typ = makeTypeDesc(c, typExpr.typ)
 
 type
@@ -64,14 +70,23 @@ proc semArrGet(c: PContext; n: PNode; flags: TExprFlags): PNode =
   if result.isNil:
     let x = copyTree(n)
     x[0] = newIdentNode(getIdent(c.cache, "[]"), n.info)
-    bracketNotFoundError(c, x)
+    if c.inGenericContext > 0:
+      for i in 0..<n.len:
+        let a = n[i]
+        if a.typ != nil and a.typ.kind in {tyGenericParam, tyFromExpr}:
+          # expression is compiled early in a generic body
+          result = semGenericStmt(c, x)
+          result.typ = makeTypeFromExpr(c, copyTree(result))
+          result.typ.flags.incl tfNonConstExpr
+          return
+    bracketNotFoundError(c, x, flags)
     #localError(c.config, n.info, "could not resolve: " & $n)
     result = errorNode(c, n)
 
 proc semArrPut(c: PContext; n: PNode; flags: TExprFlags): PNode =
   # rewrite `[]=`(a, i, x)  back to ``a[i] = x``.
   let b = newNodeI(nkBracketExpr, n.info)
-  b.add(n[1].skipAddr)
+  b.add(n[1].skipHiddenAddr)
   for i in 2..<n.len-1: b.add(n[i])
   result = newNodeI(nkAsgn, n.info, 2)
   result[0] = b
@@ -222,8 +237,9 @@ proc evalTypeTrait(c: PContext; traitCall: PNode, operand: PType, context: PSym)
   of "rangeBase":
     # return the base type of a range type
     var arg = operand.skipTypes({tyGenericInst})
-    assert arg.kind == tyRange
-    result = getTypeDescNode(c, arg.base, operand.owner, traitCall.info)
+    if arg.kind == tyRange:
+      arg = arg.base
+    result = getTypeDescNode(c, arg, operand.owner, traitCall.info)
   of "isCyclic":
     var operand = operand.skipTypes({tyGenericInst})
     let isCyclic = canFormAcycle(c.graph, operand)
@@ -235,7 +251,7 @@ proc evalTypeTrait(c: PContext; traitCall: PNode, operand: PType, context: PSym)
 proc semTypeTraits(c: PContext, n: PNode): PNode =
   checkMinSonsLen(n, 2, c.config)
   let t = n[1].typ
-  internalAssert c.config, t != nil and t.kind == tyTypeDesc
+  internalAssert c.config, t != nil and t.skipTypes({tyAlias}).kind == tyTypeDesc
   if t.len > 0:
     # This is either a type known to sem or a typedesc
     # param to a regular proc (again, known at instantiation)
@@ -561,9 +577,7 @@ proc magicsAfterOverloadResolution(c: PContext, n: PNode,
   case n[0].sym.magic
   of mAddr:
     checkSonsLen(n, 2, c.config)
-    result = n
-    result[1] = semAddrArg(c, n[1])
-    result.typ = makePtrType(c, result[1].typ)
+    result = semAddr(c, n[1])
   of mTypeOf:
     result = semTypeOf(c, n)
   of mSizeOf:
@@ -635,6 +649,16 @@ proc magicsAfterOverloadResolution(c: PContext, n: PNode,
     let op = getAttachedOp(c.graph, t, attachedTrace)
     if op != nil:
       result[0] = newSymNode(op)
+  of mDup:
+    result = n
+    let t = n[1].typ.skipTypes(abstractVar)
+    let op = getAttachedOp(c.graph, t, attachedDup)
+    if op != nil:
+      result[0] = newSymNode(op)
+      if op.typ.len == 3:
+        let boolLit = newIntLit(c.graph, n.info, 1)
+        boolLit.typ = getSysType(c.graph, n.info, tyBool)
+        result.add boolLit
   of mWasMoved:
     result = n
     let t = n[1].typ.skipTypes(abstractVar)

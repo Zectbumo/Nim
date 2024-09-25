@@ -17,8 +17,8 @@ type
     owner, genSymOwner: PSym
     instLines: bool   # use the instantiation lines numbers
     isDeclarative: bool
-    mapping: TIdTable # every gensym'ed symbol needs to be mapped to some
-                      # new symbol
+    mapping: SymMapping # every gensym'ed symbol needs to be mapped to some
+                        # new symbol
     config: ConfigRef
     ic: IdentCache
     instID: int
@@ -33,6 +33,19 @@ proc evalTemplateAux(templ, actual: PNode, c: var TemplCtx, result: PNode) =
     let x = param
     if x.kind == nkArgList:
       for y in items(x): result.add(y)
+    elif nfDefaultRefsParam in x.flags:
+      # value of default param needs to be evaluated like template body
+      # if it contains other template params
+      var res: PNode
+      if isAtom(x):
+        res = newNodeI(nkPar, x.info)
+        evalTemplateAux(x, actual, c, res)
+        if res.len == 1: res = res[0]
+      else:
+        res = copyNode(x)
+        for i in 0..<x.safeLen:
+          evalTemplateAux(x[i], actual, c, res)
+      result.add res
     else:
       result.add copyTree(x)
 
@@ -47,7 +60,7 @@ proc evalTemplateAux(templ, actual: PNode, c: var TemplCtx, result: PNode) =
         handleParam actual[s.owner.typ.signatureLen + s.position - 1]
       else:
         internalAssert c.config, sfGenSym in s.flags or s.kind == skType
-        var x = PSym(idTableGet(c.mapping, s))
+        var x = idTableGet(c.mapping, s)
         if x == nil:
           x = copySym(s, c.idgen)
           # sem'check needs to set the owner properly later, see bug #9476
@@ -56,6 +69,7 @@ proc evalTemplateAux(templ, actual: PNode, c: var TemplCtx, result: PNode) =
           #  internalAssert c.config, false
           idTablePut(c.mapping, s, x)
         if sfGenSym in s.flags:
+          # TODO: getIdent(c.ic, "`" & x.name.s & "`gensym" & $c.instID)
           result.add newIdentNode(getIdent(c.ic, x.name.s & "`gensym" & $c.instID),
             if c.instLines: actual.info else: templ.info)
         else:
@@ -186,7 +200,7 @@ proc evalTemplate*(n: PNode, tmpl, genSymOwner: PSym;
     genSymOwner: genSymOwner,
     config: conf,
     ic: ic,
-    mapping: initIdTable(),
+    mapping: initSymMapping(),
     instID: instID[],
     idgen: idgen
   )
