@@ -538,6 +538,8 @@ proc getNewLocation(lastURL: Uri, headers: HttpHeaders): Uri =
     result.anchor = parsedLocation.anchor
   else:
     result = parsedLocation
+  if result.scheme == "":
+    result.scheme = lastURL.scheme
 
 proc generateHeaders(requestUrl: Uri, httpMethod: HttpMethod, headers: HttpHeaders,
                      proxy: Proxy): string =
