@@ -566,6 +566,8 @@ proc getNewLocation(lastURL: Uri, headers: HttpHeaders): Uri =
     result.anchor = parsedLocation.anchor
   else:
     result = parsedLocation
+  if result.scheme == "":
+    result.scheme = lastURL.scheme
 
 proc checkLineSafe(s, what: string) =
   ## Raises `ValueError` if `s` could end the line it is placed in, which
