@@ -8,6 +8,7 @@
 #
 
 ## This module implements asynchronous file reading and writing.
+## On POSIX, regular-file I/O can block the event loop.
 ##
 ##   ```Nim
 ##   import std/[asyncfile, asyncdispatch, os]
@@ -91,6 +92,7 @@ proc getFileSize*(f: AsyncFile): int64 =
 
 proc newAsyncFile*(fd: AsyncFD): AsyncFile =
   ## Creates `AsyncFile` with a previously opened file descriptor `fd`.
+  ## On POSIX, pass a non-blocking descriptor for pipes and FIFOs.
   new result
   result.fd = fd
   register(fd)
