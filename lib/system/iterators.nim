@@ -298,6 +298,7 @@ iterator mitems*(a: var string): var char {.inline.} =
 iterator fields*[T: tuple|object](x: T): RootObj {.
   magic: "Fields", noSideEffect.} =
   ## Iterates over every field of `x`.
+  ## Assigning to a field updates `x` if `x` is mutable.
   ##
   ## .. warning:: This really transforms the 'for' and unrolls the loop.
   ##   The current implementation also has a bug
@@ -323,6 +324,7 @@ iterator fields*[S:tuple|object, T:tuple|object](x: S, y: T): tuple[key: string,
 iterator fieldPairs*[T: tuple|object](x: T): tuple[key: string, val: RootObj] {.
   magic: "FieldPairs", noSideEffect.} =
   ## Iterates over every field of `x` returning their name and value.
+  ## Assigning to a yielded value updates `x` if `x` is mutable.
   ##
   ## When you iterate over objects with different field types you have to use
   ## the compile time `when` instead of a runtime `if` to select the code
