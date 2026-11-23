@@ -1,11 +1,12 @@
 discard """
-cmd: "nim cpp --cppCompileToNamespace:foo $options -r $file"
+  targets: "cpp"
+  cmd: "nim $target --cppCompileToNamespace:foo --noMain $options $file"
+  output: "42"
 """
 
-# Theoretically nim could just ignore the flag cppCompileToNamespace
-# and this test would pass.  Setting ``ccodeCheck`` for a c++ target
-# doesn't work.
+{.emit: """/*INCLUDESECTION*/
+namespace foo { void NimMain(); }
+int main() { foo::NimMain(); }
+""".}
 
-import os
-
-echo "a" / "b"
+echo 42
