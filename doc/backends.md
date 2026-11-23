@@ -69,6 +69,11 @@ nimc.html#crossminuscompilation) to select the target CPU, operative system
 or compiler/linker commands.
 
 
+`--cppCompileToNamespace:foo` puts the generated C++ code in namespace `foo`.
+With `--noMain:on`, call `foo::NimMain()` from your C++ `main`.
+Shared libraries export `NimMain` with C linkage. Use `--nimMainPrefix` to rename it.
+
+
 The JavaScript target
 ---------------------
 
