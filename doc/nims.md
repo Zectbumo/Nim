@@ -148,17 +148,21 @@ NimScripts using `switch` or `--`, as shown in above examples. Few
 NimScript as a build tool
 =========================
 
-The `task` template that the `system` module defines allows a NimScript
-file to be used as a build tool. The following example defines a
-task `build` that is an alias for the `c`:option: command:
+Define custom build commands with the `task` template in your project's
+`config.nims`. For a project with an `app.nim` entry point:
 
   ```nim
-  task build, "builds an example":
-    setCommand "c"
+  task build, "Build the app":
+    exec "nim c app.nim"
+
+  task buildRelease, "Build the app in release mode":
+    exec "nim c -d:release app.nim"
   ```
 
+From the directory containing `config.nims`, run `nim build`:cmd: or
+`nim buildRelease`:cmd:. Run `nim help`:cmd: to list the tasks.
 
-In fact, as a convention the following tasks should be available:
+By convention, projects can provide these tasks:
 
 =========     ===================================================
 Task          Description
