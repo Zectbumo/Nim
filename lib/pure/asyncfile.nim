@@ -91,6 +91,14 @@ proc getFileSize*(f: AsyncFile): int64 =
 
 proc newAsyncFile*(fd: AsyncFD): AsyncFile =
   ## Creates `AsyncFile` with a previously opened file descriptor `fd`.
+  ## On POSIX, enables non-blocking mode on the underlying open file
+  ## description, including for descriptors that share it.
+  when not (defined(windows) or defined(nimdoc)):
+    let flags = fcntl(fd.cint, F_GETFL)
+    if flags == -1 or
+        ((flags and O_NONBLOCK) == 0 and
+         fcntl(fd.cint, F_SETFL, flags or O_NONBLOCK) == -1):
+      raiseOSError(osLastError())
   new result
   result.fd = fd
   register(fd)
